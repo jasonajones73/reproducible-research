@@ -1,0 +1,229 @@
+---
+title: "Health and Economic Impact of Storms and Severe Weather Events"
+author: "Jason Jones"
+date: "9/2/2018"
+output:
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, out.width="100%", dpi = 300)
+```
+
+## Synopsis
+In this analysis I amd concerned with two primary points. Which event types have the greatest health impact and the greatest economic impact. I begin my work with data processing to create usable objects for results visualization. I finish my analysis with two plots and a final table.
+
+
+## Package Load
+Load packages required for analysis.
+
+```{r}
+require(tidyverse)
+require(lubridate)
+require(kableExtra)
+
+```
+
+
+## Data Import
+Leveraging ```read_csv``` from the ```readr``` packackge included with ```tidyverse``` to import the dataset.
+
+```{r}
+weather_dat = read_csv("data/repdata%2Fdata%2FStormData.csv.bz2")
+
+```
+
+
+## Data Processing
+The first thing I want to do is convert ```BGN_DATE``` to a usable longitudinal variable. I am doing this so I can provide change-over-time information as I attempt to answer both questions presented. I am storing the result as a new object so I don't mess with my original data import object.
+
+```{r}
+new_dat = weather_dat %>%
+  mutate(BGN_DATE = str_trim(str_extract(BGN_DATE, "^\\S+\\s+"))) %>%
+  mutate(BGN_DATE = as.POSIXct(BGN_DATE, format = "%m/%d/%Y"))
+
+```
+
+
+I also want to select the most recent ten years of data. Even though there are data points from `r min(new_dat$BGN_DATE)` to `r max(new_dat$BGN_DATE)`, there are a lot of gaps in data collection the farther back you go.
+
+```{r}
+new_dat = new_dat %>%
+  filter(year(BGN_DATE) >= (year(max(BGN_DATE)) - 10))
+```
+
+
+### Question 1 Processing
+I want to attempt to provide my version of an answer to question 1 in three steps. This section will deal with data processing and later I will work through visual creation. The first thing I am doing is creating a fatalities object representative of the top 10 fatality causing event types.
+
+```{r}
+quest_1_fat = new_dat %>%
+  group_by(EVTYPE) %>%
+  summarise(fatalities_count = sum(FATALITIES)) %>%
+  ungroup() %>%
+  top_n(10, fatalities_count)
+
+```
+
+
+The next step is to create an injuries object representative of the top 10 injury causing event types. You will notice this step is just a simple modification of the first.
+
+```{r}
+quest_1_inj = new_dat %>%
+  group_by(EVTYPE) %>%
+  summarise(injury_count = sum(INJURIES)) %>%
+  ungroup() %>%
+  top_n(10, injury_count)
+```
+
+
+The third and final step starts by filtering for event types that are common between ```quest_1_fat``` and ```quest_1_inj```, then consolidates data points by month, sums up injuries and fatalities by event type, and then finally gathers injuries and fatalities into one variable.
+
+```{r}
+quest_1_final = new_dat %>%
+  filter(EVTYPE %in% quest_1_fat$EVTYPE & EVTYPE %in% quest_1_inj$EVTYPE) %>%
+  mutate(BGN_DATE = floor_date(BGN_DATE, unit = "1 month")) %>%
+  group_by(BGN_DATE, EVTYPE) %>%
+  summarise_at(c("INJURIES", "FATALITIES"), sum) %>%
+  ungroup() %>%
+  gather("measure", "count", 3:4)
+
+```
+
+
+### Question 2 Processing
+To begin question two, I am writing a function to help me convert the character values for thousand, million, and billion to their numeric value as a multiplier for the ```PROPDMG``` and ```CROPDMG``` variables.
+
+```{r}
+f = function(dat) {
+  if(dat == "K") {
+    1000
+  } else if (dat == "M") {
+    1000000
+  } else if (dat == "B") {
+    1000000000
+  } else {
+    NA
+  }
+}
+
+```
+
+
+Next, I filter out ```NA``` values for property and crop damage, create two new variables that replace the character values with integer multipliers, and then calculate actual property and crop damage values.
+
+```{r}
+new_dat = new_dat %>%
+  filter(is.na(PROPDMGEXP) == FALSE) %>%
+  filter(is.na(CROPDMGEXP) == FALSE) %>%
+  mutate(prop_mult = as.integer(map_chr(.x = PROPDMGEXP, .f = f))) %>%
+  mutate(crop_mult = as.integer(map_chr(.x = CROPDMGEXP, .f = f))) %>%
+  mutate(prop_dmg = PROPDMG * prop_mult) %>%
+  mutate(crop_dmg = CROPDMG * crop_mult)
+
+```
+
+
+Very similar to question one, I am now going to look at the top ten event types by total property damage over the last ten years.
+
+```{r}
+quest_2_prop = new_dat %>%
+  group_by(EVTYPE) %>%
+  summarise(total_dmg = sum(prop_dmg)) %>%
+  ungroup() %>%
+  top_n(10, total_dmg)
+
+```
+
+
+Here again, I am creating an object that has the top ten event types by total crop damage over the last ten years.
+
+```{r}
+quest_2_crop = new_dat %>%
+  group_by(EVTYPE) %>%
+  summarise(total_dmg = sum(crop_dmg)) %>%
+  ungroup() %>%
+  top_n(10, total_dmg)
+
+```
+
+
+As a final step, I am creating an object that filters for only event types that occur in both top ten lists and then calculates total property and crop damage over time.
+
+```{r}
+quest_2_final = new_dat %>%
+filter(EVTYPE %in% quest_2_prop$EVTYPE & EVTYPE %in% quest_2_crop$EVTYPE) %>%
+  mutate(BGN_DATE = floor_date(BGN_DATE, unit = "1 month")) %>%
+  group_by(BGN_DATE, EVTYPE) %>%
+  summarise_at(c("prop_dmg", "crop_dmg"), sum) %>%
+  ungroup() %>%
+  gather("measure", "total_dmg", 3:4)
+
+```
+
+
+## Results
+
+### Question 1 Results
+The goal of this plot is to show the most impactful event types over the past ten years. For this, I am using a faceted ```ggplot``` column visualization.
+
+```{r}
+quest_1_final %>%
+  ggplot(aes(as.character(year(BGN_DATE)), count, fill = measure)) +
+  geom_col() +
+  facet_wrap(~EVTYPE, scales = "free_y") +
+  theme(text = element_text(family = "Roboto"),
+        legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        axis.title = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_rect(fill = "#146a90"),
+        strip.text = element_text(color = "white", face = "bold")) +
+  scale_fill_viridis_d("", direction = -1)
+  
+```
+
+
+### Question 2 Results
+As with question one, the goal of this plot is to show the most impactful event types over the past ten years in terms of property and crop damage. For this, I am using a faceted ```ggplot``` column visualization that is modeled after the question one plot for consistency.
+
+```{r}
+quest_2_final %>%
+  ggplot(aes(as.character(year(BGN_DATE)), total_dmg/1000000, fill = measure)) +
+  geom_col() +
+  facet_wrap(~EVTYPE, scales = "free_y") +
+  theme(text = element_text(family = "Roboto"),
+        legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, vjust = 0.5),
+        axis.title.x = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_rect(fill = "#146a90"),
+        strip.text = element_text(color = "white", face = "bold")) +
+  labs(y = "Total Damage (millions)") +
+  scale_fill_viridis_d("", direction = -1, labels = c("Crop Damage", "Property Damage")) +
+  scale_y_continuous(labels = scales::dollar_format())
+
+```
+
+
+### Overall
+What about the worst in terms of economic impact and health? If you look at both question one and two results you will find only one event type consistent between both.
+
+```{r}
+new_dat %>%
+  filter(EVTYPE %in% quest_1_fat$EVTYPE &
+           EVTYPE %in% quest_1_inj$EVTYPE &
+           EVTYPE %in% quest_2_prop$EVTYPE &
+           EVTYPE %in% quest_2_crop$EVTYPE) %>%
+  group_by(EVTYPE) %>%
+  summarise_at(c("INJURIES", "FATALITIES", "CROPDMG", "PROPDMG"), sum) %>%
+  kable(format = "html",
+        align = "lcccc",
+        col.names = c("Event Type", "Injuries", "Fatalities", "Crop Damage", "Property Damage"),
+        format.args = list(big.mark = ",")) %>%
+  kable_styling(full_width = TRUE)
+
+```
+
